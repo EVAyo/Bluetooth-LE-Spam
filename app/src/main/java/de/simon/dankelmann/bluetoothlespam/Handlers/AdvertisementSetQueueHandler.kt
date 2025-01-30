@@ -1,21 +1,30 @@
 package de.simon.dankelmann.bluetoothlespam.Handlers
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import de.simon.dankelmann.bluetoothlespam.AdvertisementSetGenerators.ContinuityActionModalAdvertisementSetGenerator
+import de.simon.dankelmann.bluetoothlespam.AdvertisementSetGenerators.ContinuityIos17CrashAdvertisementSetGenerator
+import de.simon.dankelmann.bluetoothlespam.AdvertisementSetGenerators.ContinuityNewAirtagPopUpAdvertisementSetGenerator
+import de.simon.dankelmann.bluetoothlespam.AdvertisementSetGenerators.ContinuityNewDevicePopUpAdvertisementSetGenerator
+import de.simon.dankelmann.bluetoothlespam.AdvertisementSetGenerators.ContinuityNotYourDevicePopUpAdvertisementSetGenerator
 import de.simon.dankelmann.bluetoothlespam.AppContext.AppContext
 import de.simon.dankelmann.bluetoothlespam.Enums.AdvertisementError
 import de.simon.dankelmann.bluetoothlespam.Enums.AdvertisementQueueMode
+import de.simon.dankelmann.bluetoothlespam.Enums.AdvertisementSetType
 import de.simon.dankelmann.bluetoothlespam.Enums.TxPowerLevel
 import de.simon.dankelmann.bluetoothlespam.Helpers.QueueHandlerHelpers
 import de.simon.dankelmann.bluetoothlespam.Interfaces.Callbacks.IAdvertisementServiceCallback
+import de.simon.dankelmann.bluetoothlespam.Interfaces.Callbacks.IAdvertisementSetQueueHandlerCallback
 import de.simon.dankelmann.bluetoothlespam.Interfaces.Services.IAdvertisementService
 import de.simon.dankelmann.bluetoothlespam.Models.AdvertisementSet
 import de.simon.dankelmann.bluetoothlespam.Models.AdvertisementSetCollection
 import de.simon.dankelmann.bluetoothlespam.Models.AdvertisementSetList
+import de.simon.dankelmann.bluetoothlespam.Services.AdvertisementForegroundService
 import kotlin.random.Random
 
-class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
+class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback{
 
     // private
     private var _logTag = "AdvertisementSetQueuHandler"
@@ -23,6 +32,8 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
     private var _advertisementSetCollection:AdvertisementSetCollection = AdvertisementSetCollection()
     private var _interval:Long = 1000
     private var _advertisementServiceCallbacks:MutableList<IAdvertisementServiceCallback> = mutableListOf()
+    private var _advertisementQueueHandlerCallbacks:MutableList<IAdvertisementSetQueueHandlerCallback> = mutableListOf()
+
     private var _active = false
     private var _advertisementQueueMode: AdvertisementQueueMode = AdvertisementQueueMode.ADVERTISEMENT_QUEUE_MODE_LINEAR
 
@@ -30,13 +41,14 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
     private var _currentAdvertisementSetListIndex = 0
     private var _currentAdvertisementSetIndex = 0
 
+
     init{
         _advertisementService = AppContext.getAdvertisementService()
         if(_advertisementService != null){
             _advertisementService!!.addAdvertisementServiceCallback(this)
         }
 
-        setInterval(QueueHandlerHelpers.getInterval())
+        setInterval(QueueHandlerHelpers.getInterval(AppContext.getContext()))
     }
 
     fun setAdvertisementQueueMode(advertisementQueueMode: AdvertisementQueueMode){
@@ -69,7 +81,9 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
     }
 
     fun setAdvertisementSetCollection(advertisementSetCollection: AdvertisementSetCollection){
-        _advertisementSetCollection = advertisementSetCollection
+        if(_advertisementSetCollection != advertisementSetCollection){
+            _advertisementSetCollection = advertisementSetCollection
+        }
 
         // Reset indices
         _currentAdvertisementSet= null
@@ -109,6 +123,17 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
         }
     }
 
+    fun addAdvertisementQueueHandlerCallback(callback: IAdvertisementSetQueueHandlerCallback){
+        if(!_advertisementQueueHandlerCallbacks.contains(callback)){
+            _advertisementQueueHandlerCallbacks.add(callback)
+        }
+    }
+    fun removeAdvertisementQueueHandlerCallback(callback: IAdvertisementSetQueueHandlerCallback){
+        if(_advertisementQueueHandlerCallbacks.contains(callback)){
+            _advertisementQueueHandlerCallbacks.remove(callback)
+        }
+    }
+
     fun setIntervalSeconds(seconds:Int){
         _interval = (seconds * 1000).toLong()
     }
@@ -119,28 +144,71 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
         }
     }
 
-    fun activate(){
-        _active = true
-        if(_currentAdvertisementSet != null){
-            handleAdvertisementSet(_currentAdvertisementSet!!)
-        } else {
-            advertiseNextAdvertisementSet()
+    fun activate(startService: Boolean = true){
+        if(!_active){
+            _active = true
+
+            if(startService){
+                AdvertisementForegroundService.startService(AppContext.getContext(), "Foreground Service is running...")
+            }
+
+            _advertisementQueueHandlerCallbacks.forEach { it ->
+                try {
+                    it.onQueueHandlerActivated()
+                } catch (e:Exception){
+                    Log.e(_logTag, "Error while executing AdvertisementQueueHandlerCallback onQueueHandlerActivated")
+                }
+            }
+
+            if(_currentAdvertisementSet != null){
+                handleAdvertisementSet(_currentAdvertisementSet!!)
+            } else {
+                advertiseNextAdvertisementSet()
+            }
         }
     }
 
-    fun deactivate(){
+    fun deactivate(context: Context, stopService: Boolean = false) {
         _active = false
-        if(_advertisementService != null){
-            _advertisementService!!.stopAdvertisement()
+
+        if (AppContext.getAdvertisementService() != null) {
+            AppContext.getAdvertisementService().stopAdvertisement()
+        }
+
+        if(stopService){
+            Log.d(_logTag, "Stopping Foreground Service")
+            AdvertisementForegroundService.stopService(context)
+        }
+
+        _advertisementQueueHandlerCallbacks.forEach { it ->
+            try {
+                it.onQueueHandlerDeactivated()
+            } catch (e:Exception){
+                Log.e(_logTag, "Error while executing AdvertisementQueueHandlerCallback onQueueHandlerDeactivated")
+            }
         }
     }
 
     fun advertiseNextAdvertisementSet(){
         selectNextAdvertisementSet()
         if(_currentAdvertisementSet != null){
-            handleAdvertisementSet(_currentAdvertisementSet!!)
+            handleAdvertisementSet(prepareAdvertisementSet(_currentAdvertisementSet!!))
         } else {
             Log.e(_logTag, "Current Advertisement Set is null.")
+        }
+    }
+
+    fun prepareAdvertisementSet(advertisementSet: AdvertisementSet):AdvertisementSet{
+        when(advertisementSet.type){
+            // Continuity
+            AdvertisementSetType.ADVERTISEMENT_TYPE_CONTINUITY_NEW_DEVICE -> return ContinuityNewDevicePopUpAdvertisementSetGenerator.prepareAdvertisementSet(advertisementSet)
+            AdvertisementSetType.ADVERTISEMENT_TYPE_CONTINUITY_NEW_AIRTAG -> return ContinuityNewAirtagPopUpAdvertisementSetGenerator.prepareAdvertisementSet(advertisementSet)
+            AdvertisementSetType.ADVERTISEMENT_TYPE_CONTINUITY_NOT_YOUR_DEVICE -> return ContinuityNotYourDevicePopUpAdvertisementSetGenerator.prepareAdvertisementSet(advertisementSet)
+
+            AdvertisementSetType.ADVERTISEMENT_TYPE_CONTINUITY_ACTION_MODALS -> return ContinuityActionModalAdvertisementSetGenerator.prepareAdvertisementSet(advertisementSet)
+            AdvertisementSetType.ADVERTISEMENT_TYPE_CONTINUITY_IOS_17_CRASH -> return ContinuityIos17CrashAdvertisementSetGenerator.prepareAdvertisementSet(advertisementSet)
+
+            else -> return advertisementSet
         }
     }
 
@@ -287,13 +355,21 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
     // Callback Implementation, just pass to own Listeners
     override fun onAdvertisementSetStart(advertisementSet: AdvertisementSet?) {
         _advertisementServiceCallbacks.map {
-            it.onAdvertisementSetStart(advertisementSet)
+            try {
+                it.onAdvertisementSetStart(advertisementSet)
+            } catch (e:Exception){
+                Log.e(_logTag, "Error in: onAdvertisementSetStart ${e.message}")
+            }
         }
     }
 
     override fun onAdvertisementSetStop(advertisementSet: AdvertisementSet?) {
         _advertisementServiceCallbacks.map {
-            it.onAdvertisementSetStop(advertisementSet)
+            try {
+                it.onAdvertisementSetStop(advertisementSet)
+            } catch (e:Exception){
+                Log.e(_logTag, "Error in: onAdvertisementSetStop ${e.message}")
+            }
         }
 
         if(_advertisementService != null && !_advertisementService!!.isLegacyService()){
@@ -304,14 +380,22 @@ class  AdvertisementSetQueueHandler :IAdvertisementServiceCallback {
     override fun onAdvertisementSetSucceeded(advertisementSet: AdvertisementSet?) {
         runLocalCallback(true)
         _advertisementServiceCallbacks.map {
-            it.onAdvertisementSetSucceeded(advertisementSet)
+            try {
+                it.onAdvertisementSetSucceeded(advertisementSet)
+            } catch (e:Exception){
+                Log.e(_logTag, "Error in: onAdvertisementSetSucceeded ${e.message}")
+            }
         }
     }
 
     override fun onAdvertisementSetFailed(advertisementSet: AdvertisementSet?, advertisementError: AdvertisementError) {
         runLocalCallback(false)
         _advertisementServiceCallbacks.map {
-            it.onAdvertisementSetFailed(advertisementSet, advertisementError)
+            try {
+                it.onAdvertisementSetFailed(advertisementSet, advertisementError)
+            } catch (e:Exception){
+                Log.e(_logTag, "Error in: onAdvertisementSetFailed ${e.message}")
+            }
         }
     }
 }
